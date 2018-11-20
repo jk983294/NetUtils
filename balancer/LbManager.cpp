@@ -8,12 +8,13 @@
 
 using namespace std;
 
-LbManager::LbManager(unsigned int listenPort_, const string& upstreamHosts) : listenPort(listenPort_) {
+LbManager::LbManager(uint16_t listenPort_, const string& upstreamHosts) : listenPort(listenPort_) {
     vector<string> result = split(upstreamHosts, ',');
     for (const auto& server : result) {
         auto pUpstream = new Upstream(server);
         if (pUpstream->check()) {
             upstreams.push_back(pUpstream);
+            ++upstreamSize;
         } else {
             cerr << "init upstream " << server << " failed." << endl;
             delete pUpstream;
@@ -22,7 +23,6 @@ LbManager::LbManager(unsigned int listenPort_, const string& upstreamHosts) : li
 }
 
 LbManager::~LbManager() {
-    clinetIp2serverIndex.clear();
     for (Upstream* upstream : upstreams) {
         delete upstream;
     }
@@ -42,22 +42,17 @@ bool LbManager::startup() {
     }
 
     // pipe
-    if (pipe(pipefd) < 0) {
+    if (pipe(pipeFd) < 0) {
         perror("pipe failed");
         return false;
     }
 
     // epoll
-    epollfd = epoll_create(EPOLL_BUFFER_SIZE);  // epoll_create(int size); size is no longer used
+    epollFd = epoll_create(EPOLL_BUFFER_SIZE);  // epoll_create(int size); size is no longer used
 
     // epoll <--> listen, pipe
-    struct epoll_event ev;
-    ev.events = EPOLLIN;
-    ev.data.fd = sockListenFd;
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, sockListenFd, &ev);
-
-    ev.data.fd = pipefd[0];
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, pipefd[0], &ev);
+    epoll_add(epollFd, sockListenFd);
+    epoll_add(epollFd, pipeFd[0]);
     return true;
 }
 
@@ -65,7 +60,7 @@ void LbManager::serve() {
     struct epoll_event events[EPOLL_BUFFER_SIZE];
 
     while (true) {
-        int count = epoll_wait(epollfd, events, EPOLL_BUFFER_SIZE, -1);
+        int count = epoll_wait(epollFd, events, EPOLL_BUFFER_SIZE, -1);
         if (count < 0) {
             if (errno == EINTR) {
                 continue;
@@ -75,7 +70,7 @@ void LbManager::serve() {
             }
         }
         for (int i = 0; i < count; i++) {
-            if (events[i].data.fd == pipefd[0]) {
+            if (events[i].data.fd == pipeFd[0]) {
                 cout << "pipe data arrived, proxy serve finish, going to shutdown proxy\n";
                 return;
             } else if (events[i].data.fd == sockListenFd) {
@@ -94,9 +89,9 @@ void LbManager::serve() {
 
 void LbManager::shutdown() {
     close(sockListenFd);
-    close(epollfd);
-    close(pipefd[0]);
-    close(pipefd[1]);
+    close(epollFd);
+    close(pipeFd[0]);
+    close(pipeFd[1]);
 
     for (auto it = links.begin(); it != links.end(); it++) {
         LbLink* link = it->second;
@@ -108,57 +103,50 @@ void LbManager::shutdown() {
 }
 
 /**
- * pick upstream, can be used first time client pick server or
- * fail over to other server when finding current server failed to serve
- * @param clientIp
+ * pick upstream, used first time client pick server
  * @param currentIndex current server index in upstreams array
  * @param firstIndex the first time index picked, it should be calculated by ip hashed value
  * @return
  */
-Upstream* LbManager::pick_upstream(std::string clientIp, int& currentIndex, int firstIndex) {
-    int size = upstreams.size();
-    if (size == 0) return nullptr;
-
-    bool isPureFailover = (firstIndex >= 0);
-    if (!isPureFailover) {  // first time pick upstream
-        if (clinetIp2serverIndex.find(clientIp) != clinetIp2serverIndex.end()) {
-            currentIndex = clinetIp2serverIndex[clientIp];
-            if (upstreams[currentIndex]->good)
-                return upstreams[currentIndex];
-            else
-                clinetIp2serverIndex.erase(clientIp);
-        }
-        currentIndex = 0;
-        for (char c : clientIp) {
-            if (c != '.') {
-                currentIndex += c - '0';
-            }
-        }
-        currentIndex = (currentIndex % size);
-        firstIndex = currentIndex;
-        Upstream* picked = upstreams[currentIndex];
-        clinetIp2serverIndex[clientIp] = currentIndex;
-        if (picked->good) {
-            return picked;
-        }
-
-        // cout << "picked one status not good, switch to others" << endl;
+Upstream* LbManager::pick_upstream_on_link(LbLink* link) {
+    if (upstreamSize == 0) return nullptr;
+    if (link->check_on_link_retry_count_exceed()) {
+        return nullptr;
     }
 
+    int currentIndex = link->currentUpstreamIndex;
+
+    if (currentIndex < 0) {
+        currentIndex = link->firstUpstreamIndex;
+        link->currentUpstreamIndex = currentIndex;
+        return upstreams[currentIndex];
+    }
+    currentIndex = (link->currentUpstreamIndex + 1) % upstreamSize;
+    if (currentIndex != link->firstUpstreamIndex) {
+        link->currentUpstreamIndex = currentIndex;
+        return upstreams[currentIndex];
+    }
+    cerr << "no server available now" << endl;
+    return nullptr;
+}
+
+/**
+ * pick upstream, fail over to other server when finding current server failed to serve
+ * @param currentIndex current server index in upstreams array
+ * @param firstIndex the first time index picked, it should be calculated by ip hashed value
+ * @return
+ */
+Upstream* LbManager::pick_upstream_failover(int& currentIndex, int firstIndex) {
+    if (upstreamSize == 0) return nullptr;
+
     // fail over to other server
-    for (int i = (currentIndex + 1) % size; i != firstIndex;) {
+    for (int i = (currentIndex + 1) % upstreamSize; i != firstIndex;) {
         if (upstreams[i]->good) {
             currentIndex = i;
-            if (!isPureFailover) {
-                // pure fail-over means already have first server tried but failed to finish client's request
-                // in that case, the server may not be bad, only sometimes not response, so don't change fast index
-                // query
-                clinetIp2serverIndex[clientIp] = currentIndex;
-            }
             return upstreams[currentIndex];
         }
         ++i;
-        i %= size;
+        i %= upstreamSize;
     }
     return nullptr;
 }
@@ -173,6 +161,17 @@ void LbManager::response_client_with_server_error(int clientFd_, const string& e
     }
 }
 
+int LbManager::ip_hashed_index(const std::string& clientIp_) {
+    if (upstreamSize <= 0) return -1;
+    int index = 0;
+    for (char c : clientIp_) {
+        if (c != '.') {
+            index += c - '0';
+        }
+    }
+    return index % upstreamSize;
+}
+
 void LbManager::on_link() {
     struct sockaddr_in clientAddr;
     int socklen = sizeof(sockaddr_in);
@@ -185,35 +184,42 @@ void LbManager::on_link() {
     string clientEndpoint_ = clientIp;
     clientEndpoint_ += ':';
     clientEndpoint_ += std::to_string(ntohs(clientAddr.sin_port));
+    LbLink* link = new LbLink(clientFd_, clientEndpoint_);
+    link->firstUpstreamIndex = ip_hashed_index(clientIp);
+    if (link->firstUpstreamIndex < 0) {
+        delete link;
+        cerr << "no server available now" << endl;
+        return;
+    }
 
-    int currentIndex = -1;
-    int firstIndex = -1;
     Upstream* upstream = nullptr;
     int serverFd_ = -1;
     while (true) {
-        upstream = pick_upstream(clientIp, currentIndex, firstIndex);
+        upstream = pick_upstream_on_link(link);
         if (upstream == nullptr) {
-            cerr << "no server available now" << endl;
             response_client_with_server_error(clientFd_, "no server available now");
+            delete link;
             return;
         }
-        if (firstIndex == -1) {
-            firstIndex = currentIndex;
+        if (!upstream->good && (link->startTimestamp - upstream->badTimestamp) < FirstUpstreamBadRetryTimeThreshold) {
+            continue;
         }
+
+        ++link->onLinkRetryServerCount;
         serverFd_ = do_tcp_connect(&upstream->serverAddr);  // fd to server
         if (serverFd_ <= 0) {
             string errorMsg{"can not connect to server "};
             errorMsg += upstream->endpoint;
             perror(errorMsg.c_str());
-            upstream->good = false;
+            upstream->set_status(false);
         } else {
+            upstream->set_status(true);
             break;
         }
     }
 
-    LbLink* link = new LbLink(clientFd_, serverFd_, clientEndpoint_, upstream);
-    link->firstUpstreamIndex = firstIndex;
-    link->currentUpstreamIndex = currentIndex;
+    link->serverFd = serverFd_;
+    link->pUpstream = upstream;
 
     set_nonblock(clientFd_);
     set_nonblock(serverFd_);
@@ -222,15 +228,9 @@ void LbManager::on_link() {
     links[serverFd_] = link;
 
     // register event
-    struct epoll_event ev;
-    ev.data.fd = clientFd_;
-    ev.events = EPOLLIN;
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, clientFd_, &ev);
-    ev.data.fd = serverFd_;
-    ev.events = EPOLLIN;
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, serverFd_, &ev);
-
-    cout << now_string() << " open " << clientEndpoint_ << " <--> " << upstream->endpoint << endl;
+    epoll_add(epollFd, clientFd_);
+    epoll_add(epollFd, serverFd_);
+    link->print_on_link_info();
 }
 
 void LbManager::on_leave(int leaverFd) {
@@ -249,11 +249,8 @@ void LbManager::on_leave(LbLink* link, int leaverFd) {
     links.erase(link->serverFd);
 
     // unregister event
-    struct epoll_event ev;
-    ev.data.fd = link->clientFd;
-    epoll_ctl(epollfd, EPOLL_CTL_DEL, link->clientFd, &ev);
-    ev.data.fd = link->serverFd;
-    epoll_ctl(epollfd, EPOLL_CTL_DEL, link->serverFd, &ev);
+    epoll_delete(epollFd, link->clientFd);
+    epoll_delete(epollFd, link->serverFd);
     link->print_leave_info(leaverFd);
     delete link;
 }
@@ -281,7 +278,7 @@ bool LbManager::failover(LbLink* link) {
         upstream = link->pUpstream;
         link->hasFirstUpstreamTriedAgain = true;
     } else {
-        upstream = pick_upstream("", link->currentUpstreamIndex, link->firstUpstreamIndex);
+        upstream = pick_upstream_failover(link->currentUpstreamIndex, link->firstUpstreamIndex);
     }
 
     if (upstream == nullptr) return false;
@@ -289,24 +286,20 @@ bool LbManager::failover(LbLink* link) {
     int serverFd_ = do_tcp_connect(&upstream->serverAddr);  // fd to server
     if (serverFd_ <= 0) {
         perror("can not connect to server");
-        upstream->good = false;
+        upstream->set_status(false);
         return failover(link);  // failover again
     }
 
     // old server leave
-    struct epoll_event ev;
     int oldServerFd = link->serverFd;
-    ev.data.fd = oldServerFd;
-    epoll_ctl(epollfd, EPOLL_CTL_DEL, oldServerFd, &ev);
+    epoll_delete(epollFd, oldServerFd);
     close(oldServerFd);
     links.erase(oldServerFd);
 
     // new server setup
     links[serverFd_] = link;
     set_nonblock(serverFd_);
-    ev.data.fd = serverFd_;
-    ev.events = EPOLLIN;
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, serverFd_, &ev);
+    epoll_add(epollFd, serverFd_);
 
     cout << now_string() << " failover " << link->clientEndpoint << " <--> " << upstream->endpoint << endl;
     link->reset_server_side_for_failover(upstream, serverFd_);
@@ -350,10 +343,7 @@ void LbManager::on_data_in(int recvFd) {
     // cout << "on_data_in do_tcp_send " << otherSideFd << " " << ret << endl;
     if (ret == 0) {
         // start watch EPOLLOUT
-        struct epoll_event ev;
-        ev.data.fd = otherSideFd;
-        ev.events = EPOLLIN | EPOLLOUT;
-        epoll_ctl(epollfd, EPOLL_CTL_MOD, otherSideFd, &ev);
+        epoll_mod2both(epollFd, otherSideFd);
     } else if (ret < 0) {
         cerr << "on_data_in error " << recvFd << endl;
         on_leave(otherSideFd);
@@ -370,10 +360,7 @@ void LbManager::on_data_out(int sendFd) {
     int ret = link->on_send(sendFd);
     if (ret == 0) {        // keep watch EPOLLOUT
     } else if (ret > 0) {  // send success, then remove EPOLLOUT
-        struct epoll_event ev;
-        ev.data.fd = sendFd;
-        ev.events = EPOLLIN;
-        epoll_ctl(epollfd, EPOLL_CTL_MOD, sendFd, &ev);
+        epoll_mod2in(epollFd, sendFd);
     } else {
         cerr << "on_data_out error " << sendFd << endl;
         on_leave(sendFd);

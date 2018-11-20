@@ -2,6 +2,7 @@
 #define BEAUTY_LINK_H
 
 #include <string>
+#include "LbConstants.h"
 
 /**
  * client                      proxy                        server
@@ -11,15 +12,13 @@
  *        <------------- clientRecvBuffer <-----------------
  */
 
-#define PACKET_BUFFER_SIZE 2048
-#define EPOLL_BUFFER_SIZE 256
-constexpr int MaxServerRetZeroRetryTimes = 3;
-
 struct Upstream;
 
 struct LbLink {
     int clientFd{-1};  // accept as client fd
     int serverFd{-1};  // upstream server fd
+    int onLinkRetryServerCount{0};
+    time_t startTimestamp{time(nullptr)};
 
     size_t clientTotalBytes{0};
     int sendBufferLength{0};
@@ -34,7 +33,7 @@ struct LbLink {
     std::string clientEndpoint;
     Upstream* pUpstream{nullptr};
 
-    int firstUpstreamIndex{-1};
+    int firstUpstreamIndex{-1};  // the first time index picked, it should be calculated by ip hashed value
     int currentUpstreamIndex{-1};
     int serverRetZeroRetryTimes{0};
 
@@ -47,9 +46,13 @@ struct LbLink {
         return !(clientTotalBytes > 0 && clientTotalBytes < PACKET_BUFFER_SIZE);
     }
 
+    bool check_on_link_retry_count_exceed();
+
+    LbLink(int clientFd_, const std::string& clientEndpoint_);
     LbLink(int clientFd_, int serverFd_, const std::string& clientEndpoint_, Upstream* pUpstream_);
 
     void print_leave_info(int leaver);
+    void print_on_link_info();
 
     bool is_client_side(int fd) { return fd == clientFd; }
     bool is_server_side(int fd) { return fd == serverFd; }

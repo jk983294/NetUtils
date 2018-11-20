@@ -13,18 +13,29 @@ bool Upstream::check() {
         if (serverHost == "localhost") {
             serverHost = "0.0.0.0";
         }
-        serverPort = static_cast<unsigned int>(std::atoi(result[1].c_str()));
+        serverPort = static_cast<uint16_t>(std::atoi(result[1].c_str()));
 
         serverAddr.sin_family = AF_INET;
         serverAddr.sin_port = htons(serverPort);
 
         if (inet_pton(AF_INET, serverHost.c_str(), &serverAddr.sin_addr) <= 0) {
             perror("inet_pton convert address from text to binary form failed");
-            good = false;
+            set_status(false);
         }
     } else {
         cerr << "unknown upstream " << endpoint << endl;
-        good = false;
+        set_status(false);
     }
     return good;
+}
+
+void Upstream::set_status(bool status) {
+    if (status) {
+        if (!good) good = true;
+    } else {
+        if (good) {
+            good = false;
+        }
+        badTimestamp = time(nullptr);  // update bad time every time
+    }
 }

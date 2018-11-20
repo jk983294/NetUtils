@@ -13,6 +13,9 @@
 
 using namespace std;
 
+LbLink::LbLink(int clientFd_, const std::string& clientEndpoint_)
+    : clientFd(clientFd_), clientEndpoint(clientEndpoint_) {}
+
 LbLink::LbLink(int clientFd_, int serverFd_, const string& clientEndpoint_, Upstream* pUpstream_)
     : clientFd(clientFd_), serverFd(serverFd_), clientEndpoint(clientEndpoint_), pUpstream(pUpstream_) {}
 
@@ -28,6 +31,10 @@ void LbLink::print_leave_info(int leaver) {
             cout << "request:\n" << response << endl;
         }
     }
+}
+
+void LbLink::print_on_link_info() {
+    cout << time_t2string(startTimestamp) << " open " << clientEndpoint << " <--> " << pUpstream->endpoint << endl;
 }
 
 int LbLink::on_client_recv() {
@@ -170,4 +177,12 @@ void LbLink::reset_server_side_for_failover(Upstream* newOne, int newServerFd_) 
     pUpstream = newOne;
     serverRetZeroRetryTimes = 0;
     serverFd = newServerFd_;
+}
+
+bool LbLink::check_on_link_retry_count_exceed() {
+    if (onLinkRetryServerCount >= MaxServerOnLinkRetryCount) {
+        cerr << clientEndpoint << " exceed max on link retry count" << endl;
+        return true;
+    }
+    return false;
 }

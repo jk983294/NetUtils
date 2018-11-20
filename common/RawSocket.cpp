@@ -3,11 +3,39 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <strings.h>
+#include <sys/epoll.h>
 #include <unistd.h>
 #include <cerrno>
 #include <cstddef>
 #include <cstdio>
 #include "RawSocket.h"
+
+void epoll_add(int epollfd, int fd) {
+    struct epoll_event ev {};
+    ev.data.fd = fd;
+    ev.events = EPOLLIN;
+    epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev);
+}
+
+void epoll_mod2both(int epollfd, int fd) {
+    struct epoll_event ev {};
+    ev.data.fd = fd;
+    ev.events = EPOLLIN | EPOLLOUT;
+    epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &ev);
+}
+
+void epoll_mod2in(int epollfd, int fd) {
+    struct epoll_event ev {};
+    ev.data.fd = fd;
+    ev.events = EPOLLIN;
+    epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &ev);
+}
+
+void epoll_delete(int epollfd, int fd) {
+    struct epoll_event ev {};
+    ev.data.fd = fd;
+    epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, &ev);
+}
 
 static int wait_for_connect(int sock, int timeout) {
     int rc = -1;

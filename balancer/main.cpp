@@ -63,7 +63,7 @@ void serve_forever() {
     if (manager) {
         // 1 sec to clean up everything
         // signal pipe to manager, manager get signal will gracefully shutdown
-        close(manager->pipefd[1]);
+        close(manager->pipeFd[1]);
 
         // clean closed thread
         int count = 8;
@@ -77,11 +77,11 @@ void serve_forever() {
 }
 
 int main(int argc, char *argv[]) {
-    unsigned int listenPort;
+    uint16_t listenPort;
     string upstreams;
     po::options_description desc("Program options");
     desc.add_options()("help,h", "listen on port and direct request to upstream server")(
-        "port,p", po::value<unsigned int>(&listenPort)->default_value(8081), "port to listen")(
+        "port,p", po::value<uint16_t>(&listenPort)->default_value(8081), "port to listen")(
         "upstreams,u", po::value<string>(&upstreams)->default_value("localhost:8080"),
         "upstream servers for load balance");
 

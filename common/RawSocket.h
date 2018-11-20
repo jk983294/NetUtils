@@ -5,6 +5,14 @@
 #include <cstdint>
 #include <cstdlib>
 
+void epoll_add(int epollfd, int fd);
+
+void epoll_mod2both(int epollfd, int fd);
+
+void epoll_mod2in(int epollfd, int fd);
+
+void epoll_delete(int epollfd, int fd);
+
 int make_tcp_socket_server(char const *addrListen, uint16_t portListen);
 
 int set_nonblock(int fdSocket);
