@@ -4,6 +4,7 @@
 #include <sys/types.h>
 #include <cstdint>
 #include <cstdlib>
+#include <string>
 
 void epoll_add(int epollfd, int fd);
 
@@ -33,5 +34,7 @@ int make_udp_socket(char const *addrLocal, uint16_t portLocal);
 ssize_t send_udp(int fdSocket, uint8_t const *buf, std::size_t numBytes, char const *addrRemote, uint16_t portRemote);
 
 ssize_t read_udp(int fdSocket, uint8_t *buf, std::size_t numBytes);
+
+std::string get_ipv4_address();
 
 #endif

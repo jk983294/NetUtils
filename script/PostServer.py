@@ -9,9 +9,22 @@ from io import BytesIO
 import util as ptsutil
 import datetime
 import time
+import socket
 
 
-async_result = {}
+def get_ip_address():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(("8.8.8.8", 80))
+    return s.getsockname()[0]
+
+
+class GlobalInfo(object):
+    def __init__(self):
+        self.async_result = {}
+        self.host = None
+
+
+globalInfo = GlobalInfo()
 
 
 def gzip_encode(content):
@@ -25,7 +38,7 @@ def gzip_encode(content):
 def worker_callback(result):
     print("going to put result", result)
     ticket = result['ticket']
-    async_result[ticket] = result
+    globalInfo.async_result[ticket] = result
 
 
 def worker_job(ticket, startTS):
@@ -63,7 +76,7 @@ class PostServerHandler(BaseHTTPRequestHandler):
         self.wfile.write("GET request for {}".format(self.path).encode('utf-8'))
 
     def do_POST(self):
-        global async_result
+        global globalInfo
         if self.path[0] != '/':
             self.path = '/' + self.path
         path_list = self.path.split('/')
@@ -73,20 +86,22 @@ class PostServerHandler(BaseHTTPRequestHandler):
         print('do_POST', path_list, post_data)
         if path_list[1] == 'query_ticket':
             ticket = post_data['ticket']
-            if ticket not in async_result:
+            if ticket not in globalInfo.async_result:
                 self._set_response(gzip=False)
                 self.wfile.write(json.dumps(
                     {'status': False, 'reason': 'ticket %s not exists' % ticket}).encode('utf-8'))
             else:
                 self._set_response(gzip=True)
-                self.wfile.write(gzip_encode(json.dumps({'status': True, 'data': async_result[ticket]}).encode('utf-8')))
+                self.wfile.write(gzip_encode(json.dumps(
+                    {'status': True, 'data': globalInfo.async_result[ticket]}).encode('utf-8')))
         elif path_list[1] == 'async_query':
             ticket = ptsutil.generate_random_string(5)
             startTS = datetime.datetime.now().strftime('%Y%m%d-%H:%M:%S')
-            async_result[ticket] = {'id': ticket, 'status': 'enqueue', 'startTS': startTS}
+            globalInfo.async_result[ticket] = {'id': ticket, 'status': 'enqueue', 'startTS': startTS}
             self.worker_pool.apply_async(worker_job, args=(ticket, startTS), callback=worker_callback)
             self._set_response(gzip=False)
-            self.wfile.write(json.dumps({'status': True, 'ticket': '%s' % ticket}).encode('utf-8'))
+            self.wfile.write(json.dumps({'status': True, 'ticket': '%s' % ticket,
+                                         'host': globalInfo.host}).encode('utf-8'))
         elif path_list[1] == 'test_empty_response':
             print('recv test_empty_response')
             pass
@@ -109,7 +124,9 @@ class PostServer(object):
         self.handler = handler
 
     def run(self):
+        global globalInfo
         server_address = (self.addr, self.port)
+        globalInfo.host = '%s:%d' % (self.addr, self.port)
         httpd = ThreadingSimpleServer(server_address, self.handler)
         httpd.set_logger(self.logger)
         self.logger.info('Starting post server at %s:%s...' % (self.addr, str(self.port)))
@@ -125,7 +142,8 @@ if __name__ == '__main__':
     from sys import argv
     logging.basicConfig(level=logging.INFO)
     if len(argv) == 2:
-        server = PostServer('', int(argv[1]), PostServerHandler, logging)
+        ip = get_ip_address()
+        server = PostServer(ip, int(argv[1]), PostServerHandler, logging)
     else:
-        server = PostServer('', 18123, PostServerHandler, logging)
+        server = PostServer(ip, 18123, PostServerHandler, logging)
     server.run()

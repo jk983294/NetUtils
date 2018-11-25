@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <strings.h>
@@ -278,3 +279,28 @@ ssize_t send_udp(int fdSocket, uint8_t const *buf, std::size_t numBytes, char co
 }
 
 ssize_t read_udp(int fdSocket, uint8_t *buf, std::size_t numBytes) { return recv(fdSocket, buf, numBytes, 0); }
+
+std::string get_ipv4_address() {
+    struct ifaddrs *ifAddrStruct = nullptr;
+    struct ifaddrs *ifa = nullptr;
+
+    getifaddrs(&ifAddrStruct);
+    for (ifa = ifAddrStruct; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) {
+            continue;
+        }
+        if (ifa->ifa_addr->sa_family == AF_INET) {  // check it is IP4
+            std::string interfaceName{ifa->ifa_name};
+            if (interfaceName == "lo") continue;
+
+            void *tmpAddrPtr = &((struct sockaddr_in *)ifa->ifa_addr)->sin_addr;
+            char addressBuffer[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, tmpAddrPtr, addressBuffer, INET_ADDRSTRLEN);
+            std::string addr{addressBuffer};
+            if (addr == "127.0.0.1" || addr == "0.0.0.0") continue;
+            return addr;
+        }
+    }
+    if (ifAddrStruct != nullptr) freeifaddrs(ifAddrStruct);
+    return "";
+}

@@ -5,16 +5,18 @@
 #include <string>
 #include <vector>
 #include "LbManager.h"
+#include "RollingLog.h"
 #include "Utils.h"
 
 using namespace std;
 namespace po = boost::program_options;
 
-LbManager *manager{nullptr};
+ILbManager *manager{nullptr};
 int signo = 0;
+LbPolicy policy{LbPolicy::IP_HASHED};
 
 void *proc(void *arg) {
-    auto sp = (LbManager *)arg;
+    auto sp = (ILbManager *)arg;
     sp->serve();
     sp->shutdown();
     return nullptr;
@@ -79,11 +81,13 @@ void serve_forever() {
 int main(int argc, char *argv[]) {
     uint16_t listenPort;
     string upstreams;
+    string method;
     po::options_description desc("Program options");
     desc.add_options()("help,h", "listen on port and direct request to upstream server")(
         "port,p", po::value<uint16_t>(&listenPort)->default_value(8081), "port to listen")(
         "upstreams,u", po::value<string>(&upstreams)->default_value("localhost:8080"),
-        "upstream servers for load balance");
+        "upstream servers for load balance")("method,m", po::value<string>(&method)->default_value("ip_hashed"),
+                                             "method to load balance (ip_hashed|random)");
 
     po::variables_map vm;
     auto parsed = po::parse_command_line(argc, argv, desc);
@@ -95,7 +99,19 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    manager = new LbManager(listenPort, upstreams);
+    if (method == "random") {
+        policy = LbPolicy::RANDOMED;
+        cout << "lb policy use random method" << endl;
+    } else {
+        policy = LbPolicy::IP_HASHED;
+        cout << "lb policy use ip hashed method" << endl;
+    }
+
+    if (policy == LbPolicy::IP_HASHED)
+        manager = new LbManager<LbPolicy::IP_HASHED>(listenPort, upstreams);
+    else
+        manager = new LbManager<LbPolicy::RANDOMED>(listenPort, upstreams);
+
     if (manager->startup()) {
         pthread_create(&(manager->thread), nullptr, &proc, manager);  // remember to pthread_join
         cout << "manager localhost:" << listenPort << " <--> " << upstreams << endl;

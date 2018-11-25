@@ -2,6 +2,7 @@
 #define BEAUTY_LINK_H
 
 #include <string>
+#include "HttpParser.h"
 #include "LbConstants.h"
 
 /**
@@ -18,6 +19,7 @@ struct LbLink {
     int clientFd{-1};  // accept as client fd
     int serverFd{-1};  // upstream server fd
     int onLinkRetryServerCount{0};
+    int randomRetryServerCount{0};
     time_t startTimestamp{time(nullptr)};
 
     size_t clientTotalBytes{0};
@@ -39,18 +41,19 @@ struct LbLink {
 
     bool hasFirstUpstreamTriedAgain{false};
     bool clientHeaderParsed{false};
-    std::string clientQueryPath;
-    int clientContentLength{0};
+    bool isAsyncCall{false};
+    std::string asyncHost;
+    LbClientSource source{LbClientSource::Unknown};
+
+    LbLink(int clientFd_, const std::string& clientEndpoint_);
+    ~LbLink() = default;
 
     bool client_do_not_support_failover() {  // if bytes exceed current buffer size, means some byte cannot re-send
         return !(clientTotalBytes > 0 && clientTotalBytes < PACKET_BUFFER_SIZE);
     }
 
     bool check_on_link_retry_count_exceed();
-
-    LbLink(int clientFd_, const std::string& clientEndpoint_);
-    LbLink(int clientFd_, int serverFd_, const std::string& clientEndpoint_, Upstream* pUpstream_);
-
+    bool check_random_retry_count_exceed();
     void print_leave_info(int leaver);
     void print_on_link_info();
 
@@ -79,7 +82,7 @@ struct LbLink {
     int on_client_send();
     int on_server_send();
 
-    void parse_client_header();
+    int parse_client_content();
 
     void reset_server_side_for_failover(Upstream* newOne, int newServerFd_);
 };

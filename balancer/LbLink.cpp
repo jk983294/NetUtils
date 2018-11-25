@@ -16,9 +16,6 @@ using namespace std;
 LbLink::LbLink(int clientFd_, const std::string& clientEndpoint_)
     : clientFd(clientFd_), clientEndpoint(clientEndpoint_) {}
 
-LbLink::LbLink(int clientFd_, int serverFd_, const string& clientEndpoint_, Upstream* pUpstream_)
-    : clientFd(clientFd_), serverFd(serverFd_), clientEndpoint(clientEndpoint_), pUpstream(pUpstream_) {}
-
 void LbLink::print_leave_info(int leaver) {
     if (leaver == clientFd) {
         cout << "leave " << clientEndpoint << " " << clientTotalBytes << " -> " << pUpstream->endpoint << " "
@@ -144,30 +141,50 @@ void LbLink::on_leave() {
     close(serverFd);
 }
 
-void LbLink::parse_client_header() {
-    if (clientHeaderParsed || clientTotalBytes == 0) return;
+/**
+ * clientTotalBytes guaranteed to > 0 since it called from data_in_event
+ * @return -1 error
+ *          0 msg not complete, can not make decision
+ *          1 msg parsed complete
+ */
+int LbLink::parse_client_content() {
+    if (clientHeaderParsed) return 1;
+    if (clientTotalBytes > PACKET_BUFFER_SIZE) return -1;
 
-    string response{clientSendBuffer, clientTotalBytes};
-    cout << "content:\n" << response << endl;
-    std::istringstream resp(response);
-    std::string header;
-    std::string::size_type index;
-    while (std::getline(resp, header) && header != "\r") {
-        index = header.find(':', 0);
-        if (index != std::string::npos) {
-            string key = boost::algorithm::trim_copy(header.substr(0, index));
-            string value = boost::algorithm::trim_copy(header.substr(index + 1));
-            std::cout << "key: `" << key << "`, value: `" << value << "`" << std::endl;
-            if (key == "Content-Length") {
-                clientContentLength = std::atoi(value.c_str());
+    clientSendBuffer[clientTotalBytes] = '\0';
+    HttpParser parser(clientSendBuffer, clientTotalBytes);
+
+    parser.parse_method();
+    if (parser.has_complete_method()) {
+        if (std::strcmp(parser.get_query_path().c_str(), AsyncCallQueryPath) == 0) {
+            isAsyncCall = true;
+        }
+
+        parser.parse_header();
+        if (parser.has_complete_header()) {
+            string agent = parser.get_header("User-Agent");
+            if (!agent.empty() && agent.find("python") != string::npos) {
+                source = LbClientSource::PythonClient;
+            }
+
+            if (isAsyncCall && source == LbClientSource::PythonClient) {
+                parser.parse_body();
+                if (parser.has_complete_body()) {
+                    asyncHost = parser.get_header("host");
+                    clientHeaderParsed = true;
+                    return 1;
+                } else {
+                    return 0;
+                }
+            } else {
+                clientHeaderParsed = true;
+                return 1;
             }
         } else {
-            vector<string> result = split(header, ' ');
-            if (result.size() > 1) {
-                clientQueryPath = result[1];
-                cout << "path: " << result[1] << endl;
-            }
+            return 0;  // no complete header
         }
+    } else {
+        return 0;  // no complete method line
     }
 }
 
@@ -182,6 +199,14 @@ void LbLink::reset_server_side_for_failover(Upstream* newOne, int newServerFd_) 
 bool LbLink::check_on_link_retry_count_exceed() {
     if (onLinkRetryServerCount >= MaxServerOnLinkRetryCount) {
         cerr << clientEndpoint << " exceed max on link retry count" << endl;
+        return true;
+    }
+    return false;
+}
+
+bool LbLink::check_random_retry_count_exceed() {
+    if (randomRetryServerCount >= MaxRandomPickCount) {
+        cerr << clientEndpoint << " exceed max random retry count" << endl;
         return true;
     }
     return false;

@@ -6,6 +6,13 @@ import traceback
 import sys
 import time
 import json
+import socket
+
+
+def get_ip_address():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(("8.8.8.8", 80))
+    return s.getsockname()[0]
 
 
 class PostClient(object):
@@ -45,14 +52,15 @@ class PostClient(object):
             return {'status': True, 'data': {}}
         return ret.json()
 
-    def _query_by_ticket(self, ticket):
-        return self.post('query_ticket', {'type': 'query'}, {'ticket': ticket}, timeout=5)
+    def _query_by_ticket(self, ticket, host=None):
+        return self.post('query_ticket', {'type': 'query'}, {'ticket': ticket, 'host': host}, timeout=5)
 
     def query_by_ticket(self, async_result):
         if async_result and 'ticket' in async_result:
             ticket = async_result['ticket']
+            host = async_result['host']
             while True:
-                result = self._query_by_ticket(ticket)
+                result = self._query_by_ticket(ticket, host)
                 print('query_by_ticket', result)
                 if not result['status'] or 'data' not in result:
                     print('something wrong:', result['reason'], file=sys.stderr)
@@ -72,7 +80,8 @@ class PostClient(object):
 
 
 def test(port):
-    client = PostClient('localhost', port)
+    ip = get_ip_address()
+    client = PostClient(ip, port)
     result = client.post('/test', {'type': 'query'}, {'args': "arg_test"})
     print(result)
     result = client.async_query('test')
