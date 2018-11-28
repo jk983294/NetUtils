@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <boost/algorithm/string.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include <iostream>
 #include <sstream>
 #include "LbLink.h"
@@ -16,29 +17,40 @@ using namespace std;
 LbLink::LbLink(int clientFd_, const std::string& clientEndpoint_)
     : clientFd(clientFd_), clientEndpoint(clientEndpoint_) {}
 
-void LbLink::print_leave_info(int leaver) {
+void LbLink::print_leave_info(int leaver, std::ostream& os) {
     if (leaver == clientFd) {
-        cout << "leave " << clientEndpoint << " " << clientTotalBytes << " -> " << pUpstream->endpoint << " "
-             << serverTotalBytes << endl;
+        os << "leave " << clientEndpoint << " " << clientTotalBytes << " -> " << pUpstream->endpoint << " "
+           << serverTotalBytes << endl;
     } else {
-        cout << "leave " << pUpstream->endpoint << " " << serverTotalBytes << " -> " << clientEndpoint << " "
-             << clientTotalBytes << endl;
-        if (serverTotalBytes == 0 && clientTotalBytes > 0 && clientTotalBytes < PACKET_BUFFER_SIZE) {
-            string response{clientSendBuffer, clientTotalBytes};
-            cout << "request:\n" << response << endl;
-        }
+        os << "leave " << pUpstream->endpoint << " " << serverTotalBytes << " -> " << clientEndpoint << " "
+           << clientTotalBytes << endl;
+        print_client_request(os);
     }
 }
 
-void LbLink::print_on_link_info() {
-    cout << time_t2string(startTimestamp) << " open " << clientEndpoint << " <--> " << pUpstream->endpoint << endl;
+void LbLink::print_client_request(std::ostream& os) {
+    if (serverTotalBytes == 0 && clientTotalBytes > 0 && clientTotalBytes < PACKET_BUFFER_SIZE) {
+        string response{clientSendBuffer, clientTotalBytes};
+        os << "request:\n" << response << endl;
+    }
+}
+
+void LbLink::print_on_link_info(char lbPolicy, std::ostream& os) {
+    os << time_t2string(startTimestamp) << " open " << lbPolicy << " " << clientEndpoint << " <--> "
+       << pUpstream->endpoint << endl;
 }
 
 int LbLink::on_client_recv() {
-    sendBufferOffset = 0;
-    sendBufferLength = 0;
+    int ret;
 
-    int ret = recv(clientFd, clientSendBuffer, PACKET_BUFFER_SIZE, 0);
+    if (clearClientBuffer) {
+        sendBufferOffset = 0;
+        sendBufferLength = 0;
+        ret = recv(clientFd, clientSendBuffer, PACKET_BUFFER_SIZE, 0);
+    } else {
+        ret = recv(clientFd, clientSendBuffer + sendBufferLength, PACKET_BUFFER_SIZE - sendBufferLength, 0);
+    }
+
     if (ret < 0) {
         if (errno == EAGAIN) {
             return 0;
@@ -49,7 +61,11 @@ int LbLink::on_client_recv() {
         return -1;
     }
 
-    sendBufferLength = ret;
+    if (clearClientBuffer)
+        sendBufferLength = ret;
+    else
+        sendBufferLength += ret;
+
     clientTotalBytes += sendBufferLength;
     return ret;
 }
@@ -156,7 +172,7 @@ int LbLink::parse_client_content() {
 
     parser.parse_method();
     if (parser.has_complete_method()) {
-        if (std::strcmp(parser.get_query_path().c_str(), AsyncCallQueryPath) == 0) {
+        if (boost::algorithm::ends_with(parser.get_query_path(), AsyncCallQueryPath)) {
             isAsyncCall = true;
         }
 
@@ -174,17 +190,17 @@ int LbLink::parse_client_content() {
                     clientHeaderParsed = true;
                     return 1;
                 } else {
-                    return 0;
+                    return -2;  // no complete body
                 }
             } else {
                 clientHeaderParsed = true;
                 return 1;
             }
         } else {
-            return 0;  // no complete header
+            return -3;  // no complete header
         }
     } else {
-        return 0;  // no complete method line
+        return -4;  // no complete method line
     }
 }
 

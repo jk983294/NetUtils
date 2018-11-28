@@ -5,10 +5,13 @@
 #include <poll.h>
 #include <strings.h>
 #include <sys/epoll.h>
+#include <sys/timerfd.h>
 #include <unistd.h>
 #include <cerrno>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
+#include <iostream>
 #include "RawSocket.h"
 
 void epoll_add(int epollfd, int fd) {
@@ -303,4 +306,36 @@ std::string get_ipv4_address() {
     }
     if (ifAddrStruct != nullptr) freeifaddrs(ifAddrStruct);
     return "";
+}
+
+bool destroy_timer(int *timerFd) {
+    struct itimerspec newTime = {{0, 0}, {0, 0}};
+    struct itimerspec oldTime = {{0, 0}, {0, 0}};
+    if (timerfd_settime(*timerFd, 0, &newTime, &oldTime) < 0) {
+        std::cerr << "Failed to reset timer " << *timerFd << " :" << errno << " " << strerror(errno);
+    }
+    close(*timerFd);
+    *timerFd = -1;
+    return true;
+}
+
+bool create_timer(uint32_t intervalMilliseconds, int *timerFd) {
+    bool rc = true;
+
+    int fd = timerfd_create(CLOCK_REALTIME, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (fd < 0) {
+        std::cerr << "Failed to make timerFd " << errno << " " << strerror(errno);
+        rc = false;
+    } else {
+        *timerFd = fd;
+        uint32_t s = intervalMilliseconds / 1000;
+        uint32_t m = intervalMilliseconds - s * 1000;
+        struct itimerspec newTime = {{s, m * 1000000}, {s, m * 1000000}};
+        if (timerfd_settime(*timerFd, 0, &newTime, nullptr) < 0) {
+            std::cerr << "Failed to arm timer " << errno << " " << strerror(errno);
+            destroy_timer(timerFd);
+            rc = false;
+        }
+    }
+    return rc;
 }

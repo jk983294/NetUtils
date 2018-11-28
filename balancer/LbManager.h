@@ -12,6 +12,7 @@
 #include "LbConstants.h"
 #include "LbLink.h"
 #include "RawSocket.h"
+#include "RollingLog.h"
 #include "Upstream.h"
 #include "Utils.h"
 
@@ -33,18 +34,21 @@ struct LbManager : public ILbManager {
     mt19937 generator;
     std::uniform_int_distribution<int> uid;
     int sockListenFd;  // listen fd
-    int epollFd;       // EPOLL_CTL_ADD sockListenFd and pipeFd[0]
+    int fdHeartbeatTimer{-1};
+    int epollFd;  // EPOLL_CTL_ADD sockListenFd and pipeFd[0]
     uint16_t listenPort;
     struct sockaddr_in clientAddr;
 
     std::unordered_map<int, LbLink*> links;
     std::vector<Upstream*> upstreams;
     int upstreamSize{0};
+    RollingLog& logger;
+    ostream* os{nullptr};
 
     /**
      * listen on localhost:listenPort, when client arrives, then direct connect to serverHost:serverPort for client
      */
-    LbManager(uint16_t listenPort, const string& upstreamHosts);
+    LbManager(uint16_t listenPort, const string& upstreamHosts, RollingLog& logger_);
     virtual ~LbManager();
 
     bool startup();
@@ -64,7 +68,7 @@ struct LbManager : public ILbManager {
     int ip_hashed_index(const std::string& clientIp_);
     Upstream* pick_upstream_on_link(LbLink* link);
     Upstream* pick_upstream_failover(int& currentIndex, int firstIndex);
-    bool random_on_first_client_data_in(LbLink* link);
+    int random_on_first_client_data_in(LbLink* link);
     bool randomed_pick_upstream(LbLink* link);
     bool ip_hashed_pick_upstream(LbLink* link);
     void client_on_leave(LbLink* link);
@@ -72,11 +76,12 @@ struct LbManager : public ILbManager {
     bool failover(LbLink* link);
     Upstream* get_upstream_by_host(const string& host);
     int check_upstream_connectivity(Upstream* upstream);
-    void update_link_server_side(LbLink* link, Upstream* upstream, int serverFd_);
+    void update_link_server_side(LbLink* link, Upstream* upstream, int serverFd_, char lbPolicy);
 };
 
 template <LbPolicy policy>
-LbManager<policy>::LbManager(uint16_t listenPort_, const string& upstreamHosts) : listenPort(listenPort_) {
+LbManager<policy>::LbManager(uint16_t listenPort_, const string& upstreamHosts, RollingLog& logger_)
+    : listenPort(listenPort_), logger(logger_), os(logger_.ofs) {
     vector<string> result = split(upstreamHosts, ',');
     for (const auto& server : result) {
         auto pUpstream = new Upstream(server);
@@ -84,7 +89,7 @@ LbManager<policy>::LbManager(uint16_t listenPort_, const string& upstreamHosts) 
             upstreams.push_back(pUpstream);
             ++upstreamSize;
         } else {
-            cerr << "init upstream " << server << " failed." << endl;
+            *os << "init upstream " << server << " failed." << endl;
             delete pUpstream;
         }
     }
@@ -113,18 +118,22 @@ bool LbManager<policy>::startup() {
     // listen
     sockListenFd = do_tcp_listen(&clientAddr);
     if (sockListenFd < 0) {
-        perror("tcp listen failed");
+        *os << "tcp listen failed " << errno << " " << strerror(errno);
         return false;
     }
 
     // pipe
     if (pipe(pipeFd) < 0) {
-        perror("pipe failed");
+        *os << "pipe failed " << errno << " " << strerror(errno);
         return false;
     }
 
     // epoll
     epollFd = epoll_create(EPOLL_BUFFER_SIZE);  // epoll_create(int size); size is no longer used
+
+    if (create_timer(HeartbeatMilliseconds, &fdHeartbeatTimer)) {
+        epoll_add(epollFd, fdHeartbeatTimer);
+    }
 
     // epoll <--> listen, pipe
     epoll_add(epollFd, sockListenFd);
@@ -136,22 +145,28 @@ template <LbPolicy policy>
 void LbManager<policy>::serve() {
     struct epoll_event events[EPOLL_BUFFER_SIZE];
 
+    uint64_t dummy;
     while (true) {
         int count = epoll_wait(epollFd, events, EPOLL_BUFFER_SIZE, -1);
         if (count < 0) {
             if (errno == EINTR) {
                 continue;
             } else {
-                cerr << "epoll error\n";
+                *os << "epoll error\n";
                 return;
             }
         }
         for (int i = 0; i < count; i++) {
-            if (events[i].data.fd == pipeFd[0]) {
-                cout << "pipe data arrived, proxy serve finish, going to shutdown proxy\n";
+            int fdReady = events[i].data.fd;
+            if (fdReady == pipeFd[0]) {
+                *os << "pipe data arrived, proxy serve finish, going to shutdown proxy\n";
                 return;
-            } else if (events[i].data.fd == sockListenFd) {
+            } else if (fdReady == sockListenFd) {
                 on_link();
+            }
+            if (fdReady == fdHeartbeatTimer) {
+                read(fdReady, &dummy, sizeof(dummy));
+                os = logger.update();
             } else {
                 if (events[i].events & EPOLLOUT) {
                     on_data_out(events[i].data.fd);
@@ -204,7 +219,7 @@ Upstream* LbManager<policy>::pick_upstream_on_link(LbLink* link) {
         link->currentUpstreamIndex = currentIndex;
         return upstreams[currentIndex];
     }
-    cerr << now_string() << "no server available now" << endl;
+    *os << now_string() << "no server available now" << endl;
     return nullptr;
 }
 
@@ -256,7 +271,7 @@ int LbManager<policy>::ip_hashed_index(const std::string& clientIp_) {
  * other client stick to ip hashed host
  */
 template <LbPolicy policy>
-bool LbManager<policy>::random_on_first_client_data_in(LbLink* link) {
+int LbManager<policy>::random_on_first_client_data_in(LbLink* link) {
     int ret = link->parse_client_content();
     if (ret == 1) {
         if (link->source == LbClientSource::PythonClient) {
@@ -265,20 +280,23 @@ bool LbManager<policy>::random_on_first_client_data_in(LbLink* link) {
                 if (upstream) {
                     int serverFd = check_upstream_connectivity(upstream);
                     if (serverFd > 0) {
-                        update_link_server_side(link, upstream, serverFd);
-                        return true;
+                        update_link_server_side(link, upstream, serverFd, LbPolicyRandomTicket);
+                        return 1;
                     }
-                    return false;
+                    return -1;
                 } else {
-                    cerr << now_string() << " can not find target async host " << link->asyncHost << endl;
-                    return false;
+                    *os << now_string() << " can not find target async host " << link->asyncHost << endl;
+                    return -1;
                 }
             } else {  // randomly pick one
-                return randomed_pick_upstream(link);
+                return randomed_pick_upstream(link) ? 1 : -1;
             }
         }
+    } else if (link->isAsyncCall && ret <= -2) {  // no complete content
+        // *os << "parse_client_content failed " << ret << " " << link->source << endl;
+        return 0;
     }
-    return ip_hashed_pick_upstream(link);  // at last, restore to ip hashed method
+    return ip_hashed_pick_upstream(link) ? 1 : -1;  // at last, restore to ip hashed method
 }
 
 template <LbPolicy policy>
@@ -301,7 +319,7 @@ bool LbManager<policy>::ip_hashed_pick_upstream(LbLink* link) {
         }
     }
 
-    update_link_server_side(link, upstream, serverFd_);
+    update_link_server_side(link, upstream, serverFd_, LbPolicyIpHashed);
     return true;
 }
 
@@ -325,7 +343,7 @@ bool LbManager<policy>::randomed_pick_upstream(LbLink* link) {
         }
     }
 
-    update_link_server_side(link, upstream, serverFd_);
+    update_link_server_side(link, upstream, serverFd_, LbPolicyRandom);
     return true;
 }
 
@@ -335,7 +353,7 @@ void LbManager<policy>::on_link() {
     int socklen = sizeof(sockaddr_in);
     int clientFd_ = accept(sockListenFd, (struct sockaddr*)&clientAddr, (socklen_t*)&socklen);
     if (clientFd_ <= 0) {
-        perror("accept from client error");
+        *os << "accept from client error " << errno << " " << strerror(errno);
         return;
     }
     string clientIp = inet_ntoa(clientAddr.sin_addr);
@@ -346,7 +364,7 @@ void LbManager<policy>::on_link() {
     link->firstUpstreamIndex = ip_hashed_index(clientIp);
     if (link->firstUpstreamIndex < 0) {
         delete link;
-        cerr << now_string() << "no server available now" << endl;
+        *os << now_string() << "no server available now" << endl;
         return;
     }
 
@@ -385,7 +403,7 @@ void LbManager<policy>::on_leave(LbLink* link, int leaverFd) {
     // unregister event
     epoll_delete(epollFd, link->clientFd);
     epoll_delete(epollFd, link->serverFd);
-    link->print_leave_info(leaverFd);
+    link->print_leave_info(leaverFd, *os);
     delete link;
 }
 
@@ -394,7 +412,7 @@ void LbManager<policy>::client_on_leave(LbLink* link) {
     close(link->clientFd);
     links.erase(link->clientFd);
     epoll_delete(epollFd, link->clientFd);
-    cout << "client_on_leave " << link->clientEndpoint << " " << link->clientTotalBytes << endl;
+    *os << "client_on_leave " << link->clientEndpoint << " " << link->clientTotalBytes << endl;
     delete link;
 }
 
@@ -443,7 +461,7 @@ bool LbManager<policy>::failover(LbLink* link) {
 
     int serverFd_ = do_tcp_connect(&upstream->serverAddr);  // fd to server
     if (serverFd_ <= 0) {
-        perror("can not connect to server");
+        *os << "can not connect to server " << errno << " " << strerror(errno);
         upstream->set_status(false);
         return failover(link);  // failover again
     }
@@ -459,7 +477,7 @@ bool LbManager<policy>::failover(LbLink* link) {
     set_nonblock(serverFd_);
     epoll_add(epollFd, serverFd_);
 
-    cout << now_string() << " failover " << link->clientEndpoint << " <--> " << upstream->endpoint << endl;
+    *os << now_string() << " failover " << link->clientEndpoint << " <--> " << upstream->endpoint << endl;
     link->reset_server_side_for_failover(upstream, serverFd_);
     if (link->on_server_send() < 0) {
         return failover(link);
@@ -480,7 +498,7 @@ void LbManager<policy>::on_data_in(int recvFd) {
 
     // recv
     int ret = link->on_recv(recvFd);
-    // cout << "on_data_in do_tcp_recv " << recvFd << " " << ret << endl;
+    // *os << "on_data_in do_tcp_recv " << recvFd << " " << ret << endl;
     if (ret == 0) {
         return;
     } else if (ret < 0) {
@@ -493,10 +511,17 @@ void LbManager<policy>::on_data_in(int recvFd) {
     } else {
         if (policy == LbPolicy::RANDOMED) {
             if (link->is_client_side(recvFd) && link->pUpstream == nullptr) {
-                if (!random_on_first_client_data_in(link)) {
+                ret = random_on_first_client_data_in(link);
+                if (ret < 0) {
                     client_on_leave(link);
                     return;
+                } else if (ret == 0) {
+                    //                    *os << "wait for complete client data: " << endl;
+                    //                    link->print_client_request(*os);
+                    link->clearClientBuffer = false;
+                    return;  // wait for complete client data
                 }
+                link->clearClientBuffer = true;  // now we can send whole to server
             }
         }
     }
@@ -504,12 +529,12 @@ void LbManager<policy>::on_data_in(int recvFd) {
     // send
     int otherSideFd = link->other_side_fd(recvFd);
     ret = link->on_send(otherSideFd);
-    // cout << "on_data_in do_tcp_send " << otherSideFd << " " << ret << endl;
+    // *os << "on_data_in do_tcp_send " << otherSideFd << " " << ret << endl;
     if (ret == 0) {
         // start watch EPOLLOUT
         epoll_mod2both(epollFd, otherSideFd);
     } else if (ret < 0) {
-        cerr << "on_data_in error " << recvFd << endl;
+        *os << "on_data_in error " << recvFd << endl;
         on_leave(otherSideFd);
         return;
     }
@@ -527,7 +552,7 @@ void LbManager<policy>::on_data_out(int sendFd) {
     } else if (ret > 0) {  // send success, then remove EPOLLOUT
         epoll_mod2in(epollFd, sendFd);
     } else {
-        cerr << "on_data_out error " << sendFd << endl;
+        *os << "on_data_out error " << sendFd << endl;
         on_leave(sendFd);
     }
 }
@@ -563,8 +588,9 @@ int LbManager<policy>::do_tcp_connect(struct sockaddr_in* _addr) {
 
 template <LbPolicy policy>
 Upstream* LbManager<policy>::get_upstream_by_host(const string& host) {
+    if (host.empty()) return nullptr;
     for (Upstream* upstream : upstreams) {
-        if (upstream->endpoint == host) {
+        if (upstream->is_host_match(host)) {
             return upstream;
         }
     }
@@ -575,9 +601,7 @@ template <LbPolicy policy>
 int LbManager<policy>::check_upstream_connectivity(Upstream* upstream) {
     int serverFd_ = do_tcp_connect(&upstream->serverAddr);  // fd to server
     if (serverFd_ <= 0) {
-        string errorMsg{"can not connect to server "};
-        errorMsg += upstream->endpoint;
-        perror(errorMsg.c_str());
+        *os << "can not connect to server " << upstream->endpoint << " " << errno << " " << strerror(errno);
         upstream->set_status(false);
         return -1;
     } else {
@@ -587,14 +611,14 @@ int LbManager<policy>::check_upstream_connectivity(Upstream* upstream) {
 }
 
 template <LbPolicy policy>
-void LbManager<policy>::update_link_server_side(LbLink* link, Upstream* upstream, int serverFd_) {
+void LbManager<policy>::update_link_server_side(LbLink* link, Upstream* upstream, int serverFd_, char lbPolicy) {
     link->serverFd = serverFd_;
     link->pUpstream = upstream;
 
     set_nonblock(serverFd_);
     links[serverFd_] = link;
     epoll_add(epollFd, serverFd_);
-    link->print_on_link_info();
+    link->print_on_link_info(lbPolicy, *os);
 }
 
 #endif

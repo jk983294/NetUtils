@@ -9,6 +9,7 @@ using namespace std;
 
 struct Upstream {
     string endpoint;
+    string aliasedEndpoint;
     string serverHost;
     uint16_t serverPort;
     struct sockaddr_in serverAddr;
@@ -18,6 +19,7 @@ struct Upstream {
     Upstream(const string& endpoint_);
     bool check();
     void set_status(bool status);
+    bool is_host_match(const string& host_);
 };
 
 #endif

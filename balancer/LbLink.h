@@ -1,6 +1,7 @@
 #ifndef BEAUTY_LINK_H
 #define BEAUTY_LINK_H
 
+#include <ostream>
 #include <string>
 #include "HttpParser.h"
 #include "LbConstants.h"
@@ -42,6 +43,8 @@ struct LbLink {
     bool hasFirstUpstreamTriedAgain{false};
     bool clientHeaderParsed{false};
     bool isAsyncCall{false};
+    // this flag used to recv client request without clear old data since complete data needed for analysis
+    bool clearClientBuffer{true};
     std::string asyncHost;
     LbClientSource source{LbClientSource::Unknown};
 
@@ -54,18 +57,20 @@ struct LbLink {
 
     bool check_on_link_retry_count_exceed();
     bool check_random_retry_count_exceed();
-    void print_leave_info(int leaver);
-    void print_on_link_info();
+    void print_leave_info(int leaver, std::ostream& os);
+    void print_on_link_info(char lbPolicy, std::ostream& os);
+    void print_client_request(std::ostream& os);
 
     bool is_client_side(int fd) { return fd == clientFd; }
     bool is_server_side(int fd) { return fd == serverFd; }
     int other_side_fd(int fd) { return fd == clientFd ? serverFd : clientFd; }
     bool is_buffer_empty(int fd) {
         if (is_client_side(fd))
-            return sendBufferLength == 0;
+            return sendBufferLength == 0 || !clearClientBuffer;
         else
             return recvBufferLength == 0;
     }
+
     bool is_buffer_not_empty(int fd) { return !is_buffer_empty(fd); }
 
     void on_leave();

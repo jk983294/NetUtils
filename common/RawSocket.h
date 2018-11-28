@@ -37,4 +37,7 @@ ssize_t read_udp(int fdSocket, uint8_t *buf, std::size_t numBytes);
 
 std::string get_ipv4_address();
 
+bool destroy_timer(int *timerFd);
+bool create_timer(uint32_t intervalMilliseconds, int *timerFd);
+
 #endif

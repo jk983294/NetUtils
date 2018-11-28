@@ -82,12 +82,14 @@ int main(int argc, char *argv[]) {
     uint16_t listenPort;
     string upstreams;
     string method;
+    string logPrefix;
     po::options_description desc("Program options");
-    desc.add_options()("help,h", "listen on port and direct request to upstream server")(
-        "port,p", po::value<uint16_t>(&listenPort)->default_value(8081), "port to listen")(
-        "upstreams,u", po::value<string>(&upstreams)->default_value("localhost:8080"),
-        "upstream servers for load balance")("method,m", po::value<string>(&method)->default_value("ip_hashed"),
-                                             "method to load balance (ip_hashed|random)");
+    desc.add_options()
+    ("help,h", "listen on port and direct request to upstream server")
+    ("port,p", po::value<uint16_t>(&listenPort)->default_value(8081), "port to listen")
+    ("upstreams,u", po::value<string>(&upstreams)->default_value("localhost:8080"), "upstream servers for load balance")
+    ("method,m", po::value<string>(&method)->default_value("ip_hashed"), "method to load balance (ip_hashed|random)")
+    ("log,l", po::value<string>(&logPrefix)->default_value("/tmp/rolling.log."), "create log file with this prefix");
 
     po::variables_map vm;
     auto parsed = po::parse_command_line(argc, argv, desc);
@@ -99,22 +101,24 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    RollingLog logger(logPrefix);
+
     if (method == "random") {
         policy = LbPolicy::RANDOMED;
-        cout << "lb policy use random method" << endl;
+        *logger.ofs << "lb policy use random method" << endl;
     } else {
         policy = LbPolicy::IP_HASHED;
-        cout << "lb policy use ip hashed method" << endl;
+        *logger.ofs << "lb policy use ip hashed method" << endl;
     }
 
     if (policy == LbPolicy::IP_HASHED)
-        manager = new LbManager<LbPolicy::IP_HASHED>(listenPort, upstreams);
+        manager = new LbManager<LbPolicy::IP_HASHED>(listenPort, upstreams, logger);
     else
-        manager = new LbManager<LbPolicy::RANDOMED>(listenPort, upstreams);
+        manager = new LbManager<LbPolicy::RANDOMED>(listenPort, upstreams, logger);
 
     if (manager->startup()) {
         pthread_create(&(manager->thread), nullptr, &proc, manager);  // remember to pthread_join
-        cout << "manager localhost:" << listenPort << " <--> " << upstreams << endl;
+        *logger.ofs << "manager localhost:" << listenPort << " <--> " << upstreams << endl;
     } else {
         cerr << "manager start up failed " << endl;
         return -1;
