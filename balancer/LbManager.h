@@ -308,11 +308,11 @@ bool LbManager<policy>::ip_hashed_pick_upstream(LbLink* link) {
         if (upstream == nullptr) {
             return false;
         }
+        ++link->onLinkRetryServerCount; // add count here so that it won't trap in infinite loop
         if (!upstream->good && (link->startTimestamp - upstream->badTimestamp) < FirstUpstreamBadRetryTimeThreshold) {
             continue;
         }
 
-        ++link->onLinkRetryServerCount;
         serverFd_ = check_upstream_connectivity(upstream);  // fd to server
         if (serverFd_ > 0) {
             break;
@@ -331,12 +331,12 @@ bool LbManager<policy>::randomed_pick_upstream(LbLink* link) {
         if (link->check_random_retry_count_exceed()) {
             return false;
         }
+        ++link->randomRetryServerCount; // add count here so that it won't trap in infinite loop
         upstream = upstreams[uid(generator)];
         if (!upstream->good && (link->startTimestamp - upstream->badTimestamp) < FirstUpstreamBadRetryTimeThreshold) {
             continue;
         }
 
-        ++link->randomRetryServerCount;
         serverFd_ = check_upstream_connectivity(upstream);  // fd to server
         if (serverFd_ > 0) {
             break;
