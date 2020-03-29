@@ -16,7 +16,7 @@ message ("cxx Flags: " ${CMAKE_CXX_FLAGS})
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 include_directories(common)
-include_directories(/opt/version/latest/3rd/include)
+include_directories(/opt/3rd/common/include)
 
 add_subdirectory(common)
 add_subdirectory(proxy)
